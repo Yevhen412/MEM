@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 import httpx
 from sqlalchemy import text
 
-from db import get_engine  # только get_engine, без ensure_schema
+from app.db import get_engine  # только get_engine, без ensure_schema
 
 
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
