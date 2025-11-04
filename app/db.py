@@ -1,79 +1,36 @@
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
-from .config import DATABASE_URL
+# app/db.py
 
-_engine = None  # type: Engine | None
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-def get_engine() -> Engine:
-    global _engine
-    if _engine is None:
-        if not DATABASE_URL:
-            raise RuntimeError("DATABASE_URL not set")
-        _engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+# 🔗 Адрес базы по умолчанию.
+# 1) Открой на Railway свой сервис Postgres → вкладка Connect → Public Network.
+# 2) Скопируй строку, которая начинается на "postgresql://..."
+# 3) Вставь её вместо ТЕКУЩЕГО текста в кавычках ниже
+# 4) И ДОБАВЬ "+psycopg" после "postgresql"
+
+DEFAULT_DB_URL = "postgresql+psycopg://postgres:GpFPUHewrQheWGLArCJZtPXCURiaxGmN@maglev.proxy.rlwy.net:37635/railway"
+
+# Сначала пробуем взять из переменной окружения DATABASE_URL,
+# если Railway снова её не подставит — используем DEFAULT_DB_URL.
+DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DB_URL
+
+# Создаём один общий engine для всего приложения
+_engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+
+
+def get_engine():
+    """Вернуть общий engine (для raw SQL, если где-то понадобится)."""
     return _engine
 
-SCHEMA_SQL = '''
-CREATE TABLE IF NOT EXISTS tokens_raw (
-  id SERIAL PRIMARY KEY,
-  source TEXT NOT NULL,
-  symbol TEXT,
-  name TEXT,
-  chain TEXT,
-  contract_address TEXT,
-  website TEXT,
-  whitepaper_url TEXT,
-  coingecko_id TEXT,
-  cmc_id TEXT,
-  github_url TEXT,
-  twitter_url TEXT,
-  price NUMERIC,
-  volume_24h NUMERIC,
-  dex_liquidity_usd NUMERIC,
-  market_cap NUMERIC,
-  fdv NUMERIC,
-  mvp BOOLEAN,
-  audit BOOLEAN,
-  tier_exchange BOOLEAN,
-  top10_holders_pct NUMERIC,
-  single_holder_max_pct NUMERIC,
-  team_public BOOLEAN,
-  investors_present BOOLEAN,
-  media_mentions INT,
-  engagement_quality TEXT,
-  roadmap BOOLEAN,
-  vesting_present BOOLEAN,
-  first_seen_at TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE TABLE IF NOT EXISTS tokens_filtered (
-  id SERIAL PRIMARY KEY,
-  symbol TEXT,
-  name TEXT,
-  chain TEXT,
-  contract_address TEXT,
-  website TEXT,
-  whitepaper_url TEXT,
-  exchanges TEXT,
-  volume_24h NUMERIC,
-  dex_liquidity_usd NUMERIC,
-  audit BOOLEAN,
-  github_url TEXT,
-  twitter_url TEXT,
-  unique_value TEXT,
-  passed_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS sources_log (
-  id SERIAL PRIMARY KEY,
-  source TEXT,
-  items INT,
-  status TEXT,
-  info TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-'''
-
-def ensure_schema():
-    eng = get_engine()
-    with eng.begin() as conn:
-        conn.execute(text(SCHEMA_SQL))
+def get_session():
+    """Создать новую сессию SQLAlchemy (если понадобится в будущем)."""
+    return SessionLocal()
