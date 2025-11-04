@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from .db import get_engine, ensure_schema
+from .db import get_engine
 from .config import (
     CG_API_KEY,                     # ключ CoinGecko (может быть пустым)
     PURGE_NON_PASSED,               # True/False — удалять ли непройденные
@@ -44,7 +44,7 @@ async def collect_and_filter():
     5) Очистка непройденных и старых сырых записей.
     6) Уведомление в Telegram (если настроено).
     """
-    ensure_schema()
+    
     eng = get_engine()
 
     # -------- Параметры из переменных окружения --------
