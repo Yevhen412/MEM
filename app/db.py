@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 # Адрес базы по умолчанию (скопированный из Railway → Postgres → Connect → Public Network)
 # Если Railway опять не подставит переменную окружения DATABASE_URL,
 # используем этот дефолтный URL.
-DEFAULT_DB_URL = "postgresql+psycopg://postgres:GPpfUHEwrQheWGLArcCJ2tPXCURixaxGm@maglev.proxy.rlwy.net:37635/railway"
+DEFAULT_DB_URL = "postgresql+psycopg://postgres:GpFPUHewrQheWGLArCJZtPXCURiaxGmN@maglev.proxy.rlwy.net:37635/railway"
 
 # Сначала пробуем взять из переменной окружения DATABASE_URL,
 # если её нет — падаем назад на DEFAULT_DB_URL.
