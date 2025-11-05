@@ -7,7 +7,8 @@ from typing import List, Dict, Any
 import httpx
 from sqlalchemy import text
 
-from app.db import get_engine  # только get_engine, без ensure_schema
+# ВАЖНО: относительный импорт из того же пакета app
+from .db import get_engine
 
 
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
@@ -29,7 +30,7 @@ async def fetch_latest_coins(api_key: str, max_raw: int) -> List[Dict[str, Any]]
 
         while len(coins) < max_raw:
             params = {
-                "vs_currency": "usd",          # <-- ОБЯЗАТЕЛЬНЫЙ параметр, из-за него был 422
+                "vs_currency": "usd",          # ОБЯЗАТЕЛЬНЫЙ параметр — из-за него раньше был 422
                 "order": "volume_desc",
                 "per_page": per_page,
                 "page": page,
@@ -64,7 +65,7 @@ async def collect_and_filter():
     Ежедневный конвейер:
 
     1) Сбор сырых токенов (CoinGecko) с ограничением по количеству.
-    2) Отбор только за ПРЕДЫДУЩИЕ СУТКИ (по времени листинга).
+    2) Отбор только за ПРЕДЫДУЩИЕ СУТКИ.
     3) Фильтрация по простым правилам (пока заглушка).
     4) Сохранение прошедших.
     5) Очистка старых сырых записей.
@@ -77,14 +78,13 @@ async def collect_and_filter():
     analysis_mode = os.getenv("ANALYSIS_MODE", "previous_day").lower()
     raw_retention_hours = int(os.getenv("RAW_RETENTION_HOURS", "24"))
 
-    # Пока поддерживаем только режим previous_day
     if analysis_mode != "previous_day":
         analysis_mode = "previous_day"
 
     # Текущее время в UTC
     now_utc = datetime.now(timezone.utc)
 
-    # Окно "вчера" в UTC
+    # Окно "вчера" в UTC (для отчёта; CoinGecko напрямую по дате не режем)
     start_utc = (now_utc - timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -95,14 +95,11 @@ async def collect_and_filter():
 
     all_coins = await fetch_latest_coins(cg_api_key, max_raw)
 
-    # В этой версии берём просто все монеты за сегодня —
-    # CoinGecko /markets не даёт прямого поля "listed_at",
-    # так что временной фильтр пока условный (заглушка).
-
+    # Пока берём все собранные монеты как "сырые"
     raw_tokens = all_coins
 
     # -------- Шаг 2. Запись сырых токенов в raw_tokens --------
-    # Предполагаем таблицу raw_tokens со столбцами:
+    # Ожидаем таблицу raw_tokens:
     # id (serial), source (text), symbol (text), address (text),
     # created_at (timestamptz), raw_json (jsonb)
 
@@ -129,7 +126,7 @@ async def collect_and_filter():
     passed_tokens = raw_tokens
 
     # -------- Шаг 4. Сохранение прошедших в tokens --------
-    # Предполагаем таблицу tokens:
+    # Ожидаем таблицу tokens:
     # symbol (text), address (text PRIMARY KEY), source (text),
     # listed_at (timestamptz), raw_json (jsonb)
 
@@ -160,7 +157,6 @@ async def collect_and_filter():
             {"cutoff": cutoff},
         )
 
-    # Пока без Telegram — просто вернём статистику
     return {
         "collected": len(raw_tokens),
         "passed": len(passed_tokens),
