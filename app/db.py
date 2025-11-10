@@ -4,30 +4,32 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Адрес базы по умолчанию (скопированный из Railway → Postgres → Connect → Public Network)
-# Если Railway опять не подставит переменную окружения DATABASE_URL,
-# используем этот дефолтный URL.
-DEFAULT_DB_URL = "postgresql+psycopg://postgres:GpFPUHewrQheWGLArCJZtPXCURiaxGmN@maglev.proxy.rlwy.net:37635/railway"
+# Сюда вставь данные из Railway → Postgres → Variables
+# Пользователь: POSTGRES_USER (обычно postgres)
+# Пароль: GpFPUHewrQheWGLArCJZtPXCURiaxGmN
+# Хост:   RAILWAY_PRIVATE_DOMAIN или тот, что ты использовал в DBeaver
+# Порт:   37635 (у тебя)
+# База:   railway
+DEFAULT_DB_URL = (
+    "postgresql+psycopg://postgres:ТВОЙ_ПАРОЛЬ@maglev.proxy.rlwy.net:37635/railway"
+)
 
-# Сначала пробуем взять из переменной окружения DATABASE_URL,
-# если её нет — падаем назад на DEFAULT_DB_URL.
+# Берём из переменной окружения, если её вдруг когда-нибудь добавишь,
+# иначе используем наш дефолт.
 DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DB_URL
 
-# Создаём один общий engine для всего приложения
-_engine = create_engine(
+# На всякий случай: если в окружении опять окажется старый формат
+# "postgres://..." или "postgresql://...", мы его исправим на psycopg.
+if "psycopg" not in DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = "postgresql+psycopg" + DATABASE_URL[len("postgres") :]
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = "postgresql+psycopg" + DATABASE_URL[len("postgresql") :]
+
+engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=1800,
 )
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
-
-
-def get_engine():
-    """Вернуть общий engine для работы с базой."""
-    return _engine
-
-
-def get_session():
-    """Вернуть новую сессию SQLAlchemy (если понадобится)."""
-    return SessionLocal()
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
