@@ -14,7 +14,7 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/run-daily")
+@app.get("/run_daily")
 async def run_daily():
     try:
         result = await run_once()
