@@ -2,6 +2,7 @@
 # start
 
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
@@ -136,7 +137,8 @@ async def collect_and_filter():
                     "symbol": tk.get("symbol") or "",
                     "address": tk.get("id") or "",
                     "created_at": now_utc,
-                    "raw_json": tk,
+                    # ВАЖНО: dict -> JSON-строка, чтобы psycopg2 смог это вставить
+                    "raw_json": json.dumps(tk, ensure_ascii=False),
                 },
             )
 
@@ -164,7 +166,8 @@ async def collect_and_filter():
                     "address": tk.get("id") or "",
                     "source": "coingecko",
                     "listed_at": now_utc,
-                    "raw_json": tk,
+                    # снова dict -> JSON-строка
+                    "raw_json": json.dumps(tk, ensure_ascii=False),
                 },
             )
 
