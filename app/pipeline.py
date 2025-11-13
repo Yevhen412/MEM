@@ -3,6 +3,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
+import json
 
 import httpx
 from sqlalchemy import text
@@ -207,7 +208,7 @@ async def collect_and_filter():
                     "symbol": tk.get("symbol") or "",
                     "address": tk.get("id") or "",
                     "created_at": now_utc,
-                    "raw_json": tk,
+                    "raw_json": json.dumps(tk),
                 },
             )
 
@@ -256,7 +257,7 @@ async def collect_and_filter():
                     "address": tk.get("id") or "",
                     "source": "coingecko",
                     "listed_at": now_utc,
-                    "raw_json": tk,
+                    "raw_json": json.dumps(tk),
                 },
             )
 
