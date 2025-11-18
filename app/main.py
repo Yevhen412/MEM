@@ -4,7 +4,7 @@ import os
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from .pipeline import run_once
+from .pipeline import run_once, send_telegram
 
 app = FastAPI()
 
