@@ -3,24 +3,24 @@
 import os
 import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import httpx
-from sqlalchemy import text
-
-from .db import get_engine
 
 DEXSCREENER_BASE_URL = "https://api.dexscreener.com/latest/dex"
 
-# ---------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---------------------- #
 
+# ---------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---------------------- #
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def make_time_window_previous_day() -> tuple[datetime, datetime]:
-    """Окно 'вчера' в UTC (для будущей аналитики/отчётов)."""
+def make_time_window_previous_day() -> Tuple[datetime, datetime]:
+    """
+    Окно "прошедшие сутки" в UTC:
+    от 00:00 вчера до 00:00 сегодня.
+    """
     now = now_utc()
     start = (now - timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -31,20 +31,18 @@ def make_time_window_previous_day() -> tuple[datetime, datetime]:
 
 # ---------------------- DEXSCREENER: СБОР ---------------------- #
 
-
 async def fetch_from_dexscreener(max_raw: int) -> List[Dict[str, Any]]:
     """
-    Грубый сбор “свежих” пар с DexScreener.
+    Грубый сбор пар с DexScreener.
 
-    DexScreener не даёт идеального REST под “все новые пары за сутки”,
+    DexScreener не даёт идеального REST "все новые пары за сутки",
     поэтому используем /search?q=... как приближение.
-
-    Важно: мы НЕ падаем при ошибках, а просто логируем и идём дальше.
+    ВАЖНО: мы НЕ падаем при ошибках, а просто логируем и идём дальше.
     """
 
     collected: List[Dict[str, Any]] = []
 
-    # Поисковые запросы, которые часто цепляют мемки
+    # Поисковые запросы, которые часто цепляют мемки/новые токены
     queries = ["new", "meme", "pepe", "doge", "inu", "shib", "cat", "frog"]
 
     # Сети, которые нас интересуют
@@ -88,11 +86,11 @@ async def fetch_from_dexscreener(max_raw: int) -> List[Dict[str, Any]]:
 
                 collected.append(p)
 
-    print(f"[DexScreener] fetched ~{len(collected)} pairs")
+    print(f"[DexScreener] fetched ~{len(collected)} pairs (raw)")
     return collected
 
 
-# ---------------------- ФИЛЬТРАЦИЯ МЕМКОИНОВ ---------------------- #
+# ---------------------- КЛАССИФИКАЦИЯ ---------------------- #
 
 MEME_KEYWORDS = [
     "meme",
@@ -115,44 +113,44 @@ def contains_meme_keyword(text: str) -> bool:
     return any(k in t for k in MEME_KEYWORDS)
 
 
-def is_memecoin_from_dexscreener(p: Dict[str, Any]) -> bool:
-    """Грубый детектор мемкоинов по DexScreener-паре."""
-    base_token = p.get("baseToken") or {}
-    quote_token = p.get("quoteToken") or {}
+def is_created_in_window(p: Dict[str, Any], start: datetime, end: datetime) -> bool:
+    """
+    Проверяем, появилась ли пара в окне [start, end).
+    Используем поле pairCreatedAt (мс).
+    """
+    pair_created_at = p.get("pairCreatedAt")
+    if not pair_created_at:
+        return False
+    try:
+        ts = int(pair_created_at) / 1000.0
+        created = datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        return False
+    return start <= created < end
 
-    name = f"{base_token.get('name') or ''} {quote_token.get('name') or ''}"
-    symbol = f"{base_token.get('symbol') or ''} {quote_token.get('symbol') or ''}"
 
-    # 1) По названию/символам
+def is_memecoin(p: Dict[str, Any]) -> bool:
+    """Мемкоин / не мемкоин — чисто по названию и символу."""
+    base = p.get("baseToken") or {}
+    quote = p.get("quoteToken") or {}
+
+    name = f"{base.get('name') or ''} {quote.get('name') or ''}"
+    symbol = f"{base.get('symbol') or ''} {quote.get('symbol') or ''}"
+
     if contains_meme_keyword(name) or contains_meme_keyword(symbol):
         return True
-
-    # 2) Эвристика по цене и ликвидности
-    try:
-        price_usd = float(p.get("priceUsd") or 0)
-    except Exception:
-        price_usd = 0.0
-
-    try:
-        liq = float((p.get("liquidity") or {}).get("usd") or 0)
-    except Exception:
-        liq = 0.0
-
-    # дешёвые монеты со средней ликвидностью — часто мемки
-    if price_usd < 0.01 and 2_000 <= liq <= 500_000:
-        return True
-
     return False
 
 
-def is_serious_memecoin_from_dexscreener(p: Dict[str, Any]) -> bool:
+def is_serious(p: Dict[str, Any]) -> bool:
     """
-    Отбор более-менее серьёзных мемкоинов:
+    Отбор серьёзных проектов (и мемов, и обычных):
 
     - ликвидность > 20k
     - объём за 24ч > 50k
     - пара живёт хотя бы 6 часов
     """
+
     try:
         liq = float((p.get("liquidity") or {}).get("usd") or 0)
     except Exception:
@@ -178,128 +176,145 @@ def is_serious_memecoin_from_dexscreener(p: Dict[str, Any]) -> bool:
     return liq > 20_000 and vol_h24 > 50_000 and age_ok
 
 
-# ---------------------- ОСНОВНОЙ КОНВЕЙЕР ---------------------- #
+def build_graph_link(p: Dict[str, Any]) -> str:
+    """
+    Строим ссылку на график на Dexscreener.
+    """
+    chain = (p.get("chainId") or "").lower()
+    pair_address = p.get("pairAddress") or ""
+    if not chain or not pair_address:
+        return ""
+    return f"https://dexscreener.com/{chain}/{pair_address}"
 
+
+def extract_name_symbol(p: Dict[str, Any]) -> tuple[str, str]:
+    base = p.get("baseToken") or {}
+    name = base.get("name") or "Unknown"
+    symbol = base.get("symbol") or "?"
+    return name, symbol
+
+
+# ---------------------- TELEGRAM ---------------------- #
+
+async def send_telegram(message: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("[Telegram] TOKEN or CHAT_ID not set, skip sending")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            print(f"[Telegram] send failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"[Telegram] exception on send: {e}")
+
+
+def format_telegram_message(
+    total: int,
+    serious_tokens: List[Dict[str, Any]],
+) -> str:
+    """
+    Краткий отчёт: сколько всего, сколько прошло фильтр, список имён + ссылки.
+    """
+
+    lines: List[str] = []
+
+    lines.append("🔥 *Новые токены за прошедшие сутки*")
+    lines.append(f"Всего найдено: *{total}*")
+    lines.append(f"Серьёзных проектов: *{len(serious_tokens)}*")
+    lines.append("")
+
+    if not serious_tokens:
+        lines.append("_Сегодня серьёзных проектов не найдено._")
+        return "\n".join(lines)
+
+    lines.append("🟩 *Список серьёзных проектов:*")
+    lines.append("")
+
+    for i, t in enumerate(serious_tokens, 1):
+        name = t["name"]
+        symbol = t["symbol"]
+        link = t["link"] or "без ссылки"
+
+        lines.append(f"{i}. *{name} ({symbol})*")
+        lines.append(f"📊 {link}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------- ОСНОВНОЙ КОНВЕЙЕР ---------------------- #
 
 async def collect_and_filter():
     """
-    Основной ежедневный пайплайн:
+    Ежедневный пайплайн:
 
-    1) Забираем пары с DexScreener (max_raw шт).
-    2) Пишем всё сырьё в raw_tokens.
-    3) Отбираем мемкоины.
-    4) Делим мемкоины на serious / trash.
-    5) serious пишем в tokens.
-    6) Подчищаем старые raw_tokens.
+    1) Получаем сырые пары с DexScreener (max_raw).
+    2) Оставляем только те, что созданы за прошедшие сутки.
+    3) Отбираем серьёзные проекты (и мемы, и не-мемы).
+    4) Формируем короткий отчёт и отправляем в Telegram.
     """
 
-    engine = get_engine()
-
-    # ----- Параметры из ENV -----
     max_raw_total = int(os.getenv("MAX_RAW", "5000"))
     analysis_mode = os.getenv("ANALYSIS_MODE", "previous_day").lower()
-    raw_retention_hours = int(os.getenv("RAW_RETENTION_HOURS", "24"))
-
     if analysis_mode != "previous_day":
         analysis_mode = "previous_day"
 
     window_start_utc, window_end_utc = make_time_window_previous_day()
 
-    # ----- 1. Сбор из DexScreener -----
+    # 1. Сбор
     try:
         pairs_dex = await fetch_from_dexscreener(max_raw_total)
     except Exception as e:
         print(f"[DexScreener] fatal error in fetch: {e}")
         pairs_dex = []
 
-    now = now_utc()
+    # 2. Фильтр "за прошедшие сутки"
+    pairs_in_window: List[Dict[str, Any]] = [
+        p for p in pairs_dex if is_created_in_window(p, window_start_utc, window_end_utc)
+    ]
 
-    # ----- 2. Приводим к общему формату сырых -----
-    raw_items: List[Dict[str, Any]] = []
-    for p in pairs_dex[:max_raw_total]:
-        base = p.get("baseToken") or {}
-        symbol = base.get("symbol") or ""
-        address = base.get("address") or p.get("pairAddress") or ""
+    total_new = len(pairs_in_window)
 
-        raw_items.append(
+    # 3. Отбор серьёзных
+    serious_tokens: List[Dict[str, Any]] = []
+
+    for p in pairs_in_window:
+        if not is_serious(p):
+            continue
+
+        name, symbol = extract_name_symbol(p)
+        link = build_graph_link(p)
+
+        serious_tokens.append(
             {
-                "source": "dexscreener",
+                "name": name,
                 "symbol": symbol,
-                "address": address,
-                "created_at": now,
-                "payload": p,
+                "link": link,
             }
         )
 
-    # ----- 3. Записываем сырьё в raw_tokens -----
-    with engine.begin() as conn:
-        for item in raw_items:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO raw_tokens (source, symbol, address, created_at, raw_json)
-                    VALUES (:source, :symbol, :address, :created_at, :raw_json)
-                    """
-                ),
-                {
-                    "source": item["source"],
-                    "symbol": item["symbol"],
-                    "address": item["address"],
-                    "created_at": item["created_at"],
-                    "raw_json": json.dumps(item["payload"]),
-                },
-            )
+    # 4. Формируем и отправляем сообщение в Telegram
+    msg = format_telegram_message(total_new, serious_tokens)
+    await send_telegram(msg)
 
-    # ----- 4. Фильтрация мемкоинов и разделение serious / trash -----
-    memecoins: List[Dict[str, Any]] = []
-    serious: List[Dict[str, Any]] = []
-    trash: List[Dict[str, Any]] = []
-
-    for item in raw_items:
-        payload = item["payload"]
-
-        if not is_memecoin_from_dexscreener(payload):
-            continue
-
-        memecoins.append(item)
-
-        if is_serious_memecoin_from_dexscreener(payload):
-            serious.append(item)
-        else:
-            trash.append(item)
-
-    # ----- 5. Запись serious-мемкоинов в tokens -----
-    with engine.begin() as conn:
-        for item in serious:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO tokens (symbol, address, source, listed_at, raw_json)
-                    VALUES (:symbol, :address, :source, :listed_at, :raw_json)
-                    ON CONFLICT (address) DO NOTHING
-                    """
-                ),
-                {
-                    "symbol": item["symbol"],
-                    "address": item["address"],
-                    "source": item["source"],
-                    "listed_at": now,
-                    "raw_json": json.dumps(item["payload"]),
-                },
-            )
-
-        # очистка старых raw
-        cutoff = now - timedelta(hours=raw_retention_hours)
-        conn.execute(
-            text("DELETE FROM raw_tokens WHERE created_at < :cutoff"),
-            {"cutoff": cutoff},
-        )
-
+    # Возвращаем краткую статистику для /run_daily
     return {
-        "collected": len(raw_items),
-        "memecoins": len(memecoins),
-        "serious": len(serious),
-        "trash": len(trash),
+        "collected": len(pairs_dex),       # всего сырья из DEXScreener
+        "new_in_window": total_new,        # реально новых за прошедшие сутки
+        "serious": len(serious_tokens),    # сколько прошло фильтр
         "analysis_mode": analysis_mode,
         "window_start_utc": window_start_utc.isoformat(),
         "window_end_utc": window_end_utc.isoformat(),
