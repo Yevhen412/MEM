@@ -8,6 +8,10 @@ from .pipeline import run_once
 
 app = FastAPI()
 
+@app.get("/telegram_test")
+async def telegram_test():
+    await send_telegram("Тестовое сообщение из Railway 🚀")
+    return {"status": "sent"}
 
 @app.get("/health")
 async def health():
