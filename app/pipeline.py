@@ -196,15 +196,14 @@ def extract_name_symbol(p: Dict[str, Any]) -> tuple[str, str]:
 
 # ---------------------- TELEGRAM ---------------------- #
 
+# ------------------------------ TELEGRAM ------------------------------ #
+
 async def send_telegram(message: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-    print("[TG] token:", token[:10] if token else None)
-    print("[TG] chat_id:", chat_id)
-
     if not token or not chat_id:
-        print("[TG] ERROR: no token or chat id")
+        print("[Telegram] TOKEN or CHAT_ID not set, skip sending")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -215,16 +214,14 @@ async def send_telegram(message: str) -> None:
         "disable_web_page_preview": False,
     }
 
-    print("[TG] url:", url)
-    print("[TG] payload:", payload)
-
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(url, json=payload)
-            print("[TG] status:", resp.status_code)
-            print("[TG] response:", resp.text)
+            if resp.status_code != 200:
+                print(f"[Telegram] send failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
-        print("[TG] EXCEPTION:", e)
+        print(f"[Telegram] exception on send: {e}")
+
 
 
 def format_telegram_message(
