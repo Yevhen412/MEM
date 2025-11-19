@@ -1,11 +1,14 @@
 # app/pipeline.py
 
 import os
-import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 import httpx
+from sqlalchemy import text
+
+from .db import get_engine
+
 
 DEXSCREENER_BASE_URL = "https://api.dexscreener.com/latest/dex"
 
