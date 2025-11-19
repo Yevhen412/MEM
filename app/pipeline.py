@@ -197,7 +197,8 @@ def extract_name_symbol(p: Dict[str, Any]) -> tuple[str, str]:
     return name, symbol
 
 
-# ---------------------- TELEGRAM ---------------------- #
+
+# ------------------------------ TELEGRAM ------------------------------ #
 
 # ------------------------------ TELEGRAM ------------------------------ #
 
@@ -224,8 +225,6 @@ async def send_telegram(message: str) -> None:
                 print(f"[Telegram] send failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         print(f"[Telegram] exception on send: {e}")
-
-
 
 def format_telegram_message(
     total: int,
