@@ -1,6 +1,7 @@
 # app/main.py
 
 import os
+import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -8,10 +9,15 @@ from .pipeline import run_once, send_telegram
 
 app = FastAPI()
 
+
 @app.get("/telegram_test")
 async def telegram_test():
-    await send_telegram("Тестовое сообщение из Railway 🚀")
-    return {"status": "sent"}
+    # Запускаем отправку сообщения в фоне, чтобы не ждать ответа Telegram
+    asyncio.create_task(
+        send_telegram("Тестовое сообщение из Railway 🚀")
+    )
+    return {"status": "scheduled"}
+
 
 @app.get("/health")
 async def health():
