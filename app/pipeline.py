@@ -1,328 +1,192 @@
 # app/pipeline.py
+# start
 
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 import httpx
+from sqlalchemy import text
+
+# относительный импорт из app/db.py
+from .db import get_engine
+
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 
 
-DEXSCREENER_BASE_URL = "https://api.dexscreener.com/latest/dex"
-
-
-# ---------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---------------------- #
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def make_time_window_previous_day() -> Tuple[datetime, datetime]:
+async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[str, Any]]:
     """
-    Окно "прошедшие сутки" в UTC:
-    от 00:00 вчера до 00:00 сегодня.
+    Забираем токены с CoinGecko постранично, максимум max_raw штук.
+    Ошибки 400/500 НЕ роняют приложение — просто логируем и выходим.
     """
-    now = now_utc()
-    start = (now - timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    end = start + timedelta(days=1)
-    return start, end
-
-
-# ---------------------- DEXSCREENER: СБОР ---------------------- #
-
-async def fetch_from_dexscreener(max_raw: int) -> List[Dict[str, Any]]:
-    """
-    Грубый сбор пар с DexScreener.
-
-    DexScreener не даёт идеального REST "все новые пары за сутки",
-    поэтому используем /search?q=... как приближение.
-    ВАЖНО: мы НЕ падаем при ошибках, а просто логируем и идём дальше.
-    """
-
+    per_page = 250
+    page = 1
     collected: List[Dict[str, Any]] = []
 
-    # Поисковые запросы, которые часто цепляют мемки/новые токены
-    queries = ["new", "meme", "pepe", "doge", "inu", "shib", "cat", "frog"]
+    headers: Dict[str, str] = {}
+    # Если когда-нибудь понадобится Pro-ключ CoinGecko:
+    # if cg_api_key:
+    #     headers["x-cg-pro-api-key"] = cg_api_key
 
-    # Сети, которые нас интересуют
-    chains = {"solana", "ethereum", "base", "bsc", "arbitrum"}
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        for q in queries:
-            if len(collected) >= max_raw:
-                break
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        while len(collected) < max_raw:
+            params = {
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": per_page,
+                "page": page,
+                "sparkline": "false",
+            }
 
             try:
                 resp = await client.get(
-                    f"{DEXSCREENER_BASE_URL}/search",
-                    params={"q": q},
+                    f"{COINGECKO_BASE_URL}/coins/markets",
+                    params=params,
                 )
             except Exception as e:
-                print(f"[DexScreener] request error for q={q}: {e}")
-                continue
+                print(f"[CoinGecko] request error on page={page}: {e}")
+                break
 
             if resp.status_code != 200:
                 print(
-                    f"[DexScreener] status {resp.status_code} q={q}: "
-                    f"{resp.text[:200]}"
+                    f"[CoinGecko] status {resp.status_code} on page={page}: "
+                    f"{resp.text[:300]}"
                 )
-                continue
+                break
 
             try:
                 data = resp.json()
             except Exception as e:
-                print(f"[DexScreener] JSON parse error q={q}: {e}")
-                continue
+                print(f"[CoinGecko] JSON parse error on page={page}: {e}")
+                break
 
-            pairs: List[Dict[str, Any]] = data.get("pairs") or []
-            for p in pairs:
+            if not data:
+                # Монеты закончились
+                break
+
+            for token in data:
+                collected.append(token)
                 if len(collected) >= max_raw:
                     break
 
-                chain_id = (p.get("chainId") or "").lower()
-                if chains and chain_id not in chains:
-                    continue
+            # Если вернули меньше per_page — страниц больше нет
+            if len(data) < per_page or len(collected) >= max_raw:
+                break
 
-                collected.append(p)
+            page += 1
 
-    print(f"[DexScreener] fetched ~{len(collected)} pairs (raw)")
+    print(f"[CoinGecko] fetched {len(collected)} tokens total")
     return collected
 
 
-# ---------------------- КЛАССИФИКАЦИЯ ---------------------- #
-
-MEME_KEYWORDS = [
-    "meme",
-    "pepe",
-    "wojak",
-    "doge",
-    "shib",
-    "inu",
-    "floki",
-    "bonk",
-    "cat",
-    "kitty",
-    "frog",
-    "elon",
-]
-
-
-def contains_meme_keyword(text: str) -> bool:
-    t = text.lower()
-    return any(k in t for k in MEME_KEYWORDS)
-
-
-def is_created_in_window(p: Dict[str, Any], start: datetime, end: datetime) -> bool:
-    """
-    Проверяем, появилась ли пара в окне [start, end).
-    Используем поле pairCreatedAt (мс).
-    """
-    pair_created_at = p.get("pairCreatedAt")
-    if not pair_created_at:
-        return False
-    try:
-        ts = int(pair_created_at) / 1000.0
-        created = datetime.fromtimestamp(ts, tz=timezone.utc)
-    except Exception:
-        return False
-    return start <= created < end
-
-
-def is_memecoin(p: Dict[str, Any]) -> bool:
-    """Мемкоин / не мемкоин — чисто по названию и символу."""
-    base = p.get("baseToken") or {}
-    quote = p.get("quoteToken") or {}
-
-    name = f"{base.get('name') or ''} {quote.get('name') or ''}"
-    symbol = f"{base.get('symbol') or ''} {quote.get('symbol') or ''}"
-
-    if contains_meme_keyword(name) or contains_meme_keyword(symbol):
-        return True
-    return False
-
-
-def is_serious(p: Dict[str, Any]) -> bool:
-    """
-    Отбор серьёзных проектов (и мемов, и обычных):
-
-    - ликвидность > 20k
-    - объём за 24ч > 50k
-    - пара живёт хотя бы 6 часов
-    """
-
-    try:
-        liq = float((p.get("liquidity") or {}).get("usd") or 0)
-    except Exception:
-        liq = 0.0
-
-    try:
-        vol_h24 = float((p.get("volume") or {}).get("h24") or 0)
-    except Exception:
-        vol_h24 = 0.0
-
-    # возраст пары
-    age_ok = True
-    pair_created_at = p.get("pairCreatedAt")
-    try:
-        if pair_created_at:
-            ts = int(pair_created_at) / 1000.0
-            created = datetime.fromtimestamp(ts, tz=timezone.utc)
-            age = now_utc() - created
-            age_ok = age >= timedelta(hours=6)
-    except Exception:
-        age_ok = True  # если не смогли посчитать — не режем
-
-    return liq > 20_000 and vol_h24 > 50_000 and age_ok
-
-
-def build_graph_link(p: Dict[str, Any]) -> str:
-    """
-    Строим ссылку на график на Dexscreener.
-    """
-    chain = (p.get("chainId") or "").lower()
-    pair_address = p.get("pairAddress") or ""
-    if not chain or not pair_address:
-        return ""
-    return f"https://dexscreener.com/{chain}/{pair_address}"
-
-
-def extract_name_symbol(p: Dict[str, Any]) -> tuple[str, str]:
-    base = p.get("baseToken") or {}
-    name = base.get("name") or "Unknown"
-    symbol = base.get("symbol") or "?"
-    return name, symbol
-
-
-
-# ------------------------------ TELEGRAM ------------------------------ #
-
-# ------------------------------ TELEGRAM ------------------------------ #
-
-async def send_telegram(message: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        print("[Telegram] TOKEN or CHAT_ID not set, skip sending")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                print(f"[Telegram] send failed: {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        print(f"[Telegram] exception on send: {e}")
-
-def format_telegram_message(
-    total: int,
-    serious_tokens: List[Dict[str, Any]],
-) -> str:
-    """
-    Краткий отчёт: сколько всего, сколько прошло фильтр, список имён + ссылки.
-    """
-
-    lines: List[str] = []
-
-    lines.append("🔥 *Новые токены за прошедшие сутки*")
-    lines.append(f"Всего найдено: *{total}*")
-    lines.append(f"Серьёзных проектов: *{len(serious_tokens)}*")
-    lines.append("")
-
-    if not serious_tokens:
-        lines.append("_Сегодня серьёзных проектов не найдено._")
-        return "\n".join(lines)
-
-    lines.append("🟩 *Список серьёзных проектов:*")
-    lines.append("")
-
-    for i, t in enumerate(serious_tokens, 1):
-        name = t["name"]
-        symbol = t["symbol"]
-        link = t["link"] or "без ссылки"
-
-        lines.append(f"{i}. *{name} ({symbol})*")
-        lines.append(f"📊 {link}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-# ---------------------- ОСНОВНОЙ КОНВЕЙЕР ---------------------- #
-
 async def collect_and_filter():
     """
-    Ежедневный пайплайн:
+    Ежедневный конвейер:
 
-    1) Получаем сырые пары с DexScreener (max_raw).
-    2) Оставляем только те, что созданы за прошедшие сутки.
-    3) Отбираем серьёзные проекты (и мемы, и не-мемы).
-    4) Формируем короткий отчёт и отправляем в Telegram.
+    1) Сбор сырых токенов (CoinGecko) с ограничением по количеству.
+    2) Отбор только за ПРЕДЫДУЩИЕ СУТКИ (окно для отчёта).
+    3) Фильтрация по простым правилам (пока заглушка, пропускаем всё).
+    4) Сохранение прошедших в tokens.
+    5) Очистка старых записей из raw_tokens.
     """
 
-    max_raw_total = int(os.getenv("MAX_RAW", "5000"))
+    engine = get_engine()
+
+    # -------- Параметры из переменных окружения --------
+    max_raw = int(os.getenv("MAX_RAW", "5000"))
     analysis_mode = os.getenv("ANALYSIS_MODE", "previous_day").lower()
+    raw_retention_hours = int(os.getenv("RAW_RETENTION_HOURS", "24"))
+
     if analysis_mode != "previous_day":
         analysis_mode = "previous_day"
 
-    window_start_utc, window_end_utc = make_time_window_previous_day()
+    # Текущее время в UTC
+    now_utc = datetime.now(timezone.utc)
 
-    # 1. Сбор
-    try:
-        pairs_dex = await fetch_from_dexscreener(max_raw_total)
-    except Exception as e:
-        print(f"[DexScreener] fatal error in fetch: {e}")
-        pairs_dex = []
+    # Окно «вчера» в UTC (для отчёта; CoinGecko по дате мы не режем)
+    start_utc = (now_utc - timedelta(days=1)).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    end_utc = start_utc + timedelta(days=1)
 
-    # 2. Фильтр "за прошедшие сутки"
-    pairs_in_window: List[Dict[str, Any]] = [
-        p for p in pairs_dex if is_created_in_window(p, window_start_utc, window_end_utc)
-    ]
+    # -------- Шаг 1. Сбор сырых монет с CoinGecko --------
+    cg_api_key = os.getenv("COINGECO_API_KEY", "")
 
-    total_new = len(pairs_in_window)
+    coins: List[Dict[str, Any]] = await fetch_latest_coins(cg_api_key, max_raw)
 
-    # 3. Отбор серьёзных
-    serious_tokens: List[Dict[str, Any]] = []
+    # -------- Шаг 2. Запись сырых токенов в raw_tokens --------
+    # Ожидаем таблицу raw_tokens:
+    # id (serial), source (text), symbol (text), address (text),
+    # created_at (timestamptz), raw_json (jsonb)
 
-    for p in pairs_in_window:
-        if not is_serious(p):
-            continue
+    with engine.begin() as conn:
+        for tk in coins:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO raw_tokens (source, symbol, address, created_at, raw_json)
+                    VALUES (:source, :symbol, :address, :created_at, :raw_json)
+                    """
+                ),
+                {
+                    "source": "coingecko",
+                    "symbol": tk.get("symbol") or "",
+                    "address": tk.get("id") or "",
+                    "created_at": now_utc,
+                    # ВАЖНО: dict -> JSON-строка, чтобы psycopg2 смог это вставить
+                    "raw_json": json.dumps(tk, ensure_ascii=False),
+                },
+            )
 
-        name, symbol = extract_name_symbol(p)
-        link = build_graph_link(p)
+    # -------- Шаг 3. Фильтрация (пока заглушка) --------
+    # Здесь потом появятся реальные правила. Сейчас пропускаем всё.
+    passed_tokens = coins
 
-        serious_tokens.append(
-            {
-                "name": name,
-                "symbol": symbol,
-                "link": link,
-            }
+    # -------- Шаг 4. Сохранение прошедших в tokens --------
+    # Ожидаем таблицу tokens:
+    # symbol (text), address (text PRIMARY KEY), source (text),
+    # listed_at (timestamptz), raw_json (jsonb)
+
+    with engine.begin() as conn:
+        for tk in passed_tokens:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tokens (symbol, address, source, listed_at, raw_json)
+                    VALUES (:symbol, :address, :source, :listed_at, :raw_json)
+                    ON CONFLICT (address) DO NOTHING
+                    """
+                ),
+                {
+                    "symbol": tk.get("symbol") or "",
+                    "address": tk.get("id") or "",
+                    "source": "coingecko",
+                    "listed_at": now_utc,
+                    # снова dict -> JSON-строка
+                    "raw_json": json.dumps(tk, ensure_ascii=False),
+                },
+            )
+
+        # -------- Шаг 5. Очистка старых сырых --------
+        cutoff = now_utc - timedelta(hours=raw_retention_hours)
+        conn.execute(
+            text("DELETE FROM raw_tokens WHERE created_at < :cutoff"),
+            {"cutoff": cutoff},
         )
 
-    # 4. Формируем и отправляем сообщение в Telegram
-    msg = format_telegram_message(total_new, serious_tokens)
-    await send_telegram(msg)
-
-    # Возвращаем краткую статистику для /run_daily
     return {
-        "collected": len(pairs_dex),       # всего сырья из DEXScreener
-        "new_in_window": total_new,        # реально новых за прошедшие сутки
-        "serious": len(serious_tokens),    # сколько прошло фильтр
+        "collected": len(coins),
+        "passed": len(passed_tokens),
         "analysis_mode": analysis_mode,
-        "window_start_utc": window_start_utc.isoformat(),
-        "window_end_utc": window_end_utc.isoformat(),
+        "window_start_utc": start_utc.isoformat(),
+        "window_end_utc": end_utc.isoformat(),
     }
 
 
 async def run_once():
-    """Единичный запуск пайплайна (используется в main.py)."""
+    """Обёртка для единичного запуска пайплайна (используется в main.py)."""
     return await collect_and_filter()
