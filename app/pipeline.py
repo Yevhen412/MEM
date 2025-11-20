@@ -12,6 +12,63 @@ from sqlalchemy import text
 # относительный импорт из app/db.py
 from .db import get_engine
 
+MEME_KEYWORDS = [
+    "doge", "shib", "inu", "pepe", "floki", "elon",
+    "baby", "kitty", "cat", "dog", "meme", "frog",
+    "bonk", "snek", "wojak",
+]
+
+
+def _is_memecoin(token: Dict[str, Any]) -> bool:
+    name = (token.get("name") or "").lower()
+    symbol = (token.get("symbol") or "").lower()
+    text = f"{name} {symbol}"
+    return any(k in text for k in MEME_KEYWORDS)
+
+
+def _is_serious_by_metrics(token: Dict[str, Any]) -> bool:
+    """Грубые пороги, чтобы отсеять совсем мусор."""
+    def _to_float(x):
+        try:
+            return float(x or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    mcap = _to_float(token.get("market_cap"))
+    vol = _to_float(token.get("total_volume"))
+    price = _to_float(token.get("current_price"))
+
+    if price <= 0:
+        return False
+
+    # достаточно «серьёзные» по ликвидности
+    if mcap >= 5_000_000 and vol >= 250_000:
+        return True
+    if vol >= 1_000_000:
+        return True
+    return False
+
+
+def classify_token(token: Dict[str, Any]) -> str:
+    """
+    Возвращает:
+      - "serious"            — серьёзный не-мем
+      - "serious_memecoin"   — серьёзный мемкоин
+      - "trash_memecoin"     — мемкоин-мусор
+      - "trash"              — прочий хлам
+    """
+    is_meme = _is_memecoin(token)
+    is_serious = _is_serious_by_metrics(token)
+
+    if is_serious and is_meme:
+        return "serious_memecoin"
+    if is_serious:
+        return "serious"
+    if is_meme:
+        return "trash_memecoin"
+    return "trash"
+
+
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 
 
@@ -142,9 +199,26 @@ async def collect_and_filter():
                 },
             )
 
-    # -------- Шаг 3. Фильтрация (пока заглушка) --------
-    # Здесь потом появятся реальные правила. Сейчас пропускаем всё.
-    passed_tokens = coins
+        # -------- Шаг 3. Фильтрация --------
+    memecoins: List[Dict[str, Any]] = []
+    serious_tokens: List[Dict[str, Any]] = []
+    trash_tokens: List[Dict[str, Any]] = []
+
+    for tk in coins:
+        cls = classify_token(tk)
+
+        if cls in ("serious", "serious_memecoin"):
+            serious_tokens.append(tk)
+
+        if "memecoin" in cls:
+            memecoins.append(tk)
+
+        if "trash" in cls:
+            trash_tokens.append(tk)
+
+    # В БД и в результат пайплайна пойдут только серьёзные проекты
+    passed_tokens = serious_tokens
+
 
     # -------- Шаг 4. Сохранение прошедших в tokens --------
     # Ожидаем таблицу tokens:
@@ -178,13 +252,17 @@ async def collect_and_filter():
             {"cutoff": cutoff},
         )
 
-    return {
+       return {
         "collected": len(coins),
         "passed": len(passed_tokens),
+        "memecoins": len(memecoins),
+        "serious": len(serious_tokens),
+        "trash": len(trash_tokens),
         "analysis_mode": analysis_mode,
         "window_start_utc": start_utc.isoformat(),
         "window_end_utc": end_utc.isoformat(),
     }
+
 
 
 async def run_once():
