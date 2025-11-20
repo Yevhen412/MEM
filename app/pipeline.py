@@ -1,5 +1,4 @@
 # app/pipeline.py
-# start
 
 import os
 import json
@@ -9,8 +8,11 @@ from typing import List, Dict, Any
 import httpx
 from sqlalchemy import text
 
-# относительный импорт из app/db.py
 from .db import get_engine
+
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+
+# -------------------- КЛЮЧЕВЫЕ СЛОВА ДЛЯ МЕМКОИНОВ -------------------- #
 
 MEME_KEYWORDS = [
     "doge", "shib", "inu", "pepe", "floki", "elon",
@@ -27,7 +29,7 @@ def _is_memecoin(token: Dict[str, Any]) -> bool:
 
 
 def _is_serious_by_metrics(token: Dict[str, Any]) -> bool:
-    """Грубые пороги, чтобы отсеять совсем мусор."""
+    """Грубые пороги, чтобы отсечь совсем мусорные монеты."""
     def _to_float(x):
         try:
             return float(x or 0)
@@ -41,7 +43,7 @@ def _is_serious_by_metrics(token: Dict[str, Any]) -> bool:
     if price <= 0:
         return False
 
-    # достаточно «серьёзные» по ликвидности
+    # Достаточно «живые» монеты по ликвидности
     if mcap >= 5_000_000 and vol >= 250_000:
         return True
     if vol >= 1_000_000:
@@ -69,20 +71,20 @@ def classify_token(token: Dict[str, Any]) -> str:
     return "trash"
 
 
-COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+# -------------------- ЗАГРУЗКА С COINGECKO -------------------- #
 
 
 async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[str, Any]]:
     """
     Забираем токены с CoinGecko постранично, максимум max_raw штук.
-    Ошибки 400/500 НЕ роняют приложение — просто логируем и выходим.
+    Ошибки 400/500 не роняют приложение — просто логируем и выходим.
     """
     per_page = 250
     page = 1
     collected: List[Dict[str, Any]] = []
 
     headers: Dict[str, str] = {}
-    # Если когда-нибудь понадобится Pro-ключ CoinGecko:
+    # Если когда-нибудь понадобится Pro-ключ:
     # if cg_api_key:
     #     headers["x-cg-pro-api-key"] = cg_api_key
 
@@ -119,7 +121,6 @@ async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[
                 break
 
             if not data:
-                # Монеты закончились
                 break
 
             for token in data:
@@ -127,7 +128,6 @@ async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[
                 if len(collected) >= max_raw:
                     break
 
-            # Если вернули меньше per_page — страниц больше нет
             if len(data) < per_page or len(collected) >= max_raw:
                 break
 
@@ -137,50 +137,57 @@ async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[
     return collected
 
 
-async def collect_and_filter():
-    """
-    Ежедневный конвейер:
+# -------------------- ОСНОВНОЙ КОНВЕЙЕР -------------------- #
 
-    1) Сбор сырых токенов (CoinGecko) с ограничением по количеству.
-    2) Отбор только за ПРЕДЫДУЩИЕ СУТКИ (окно для отчёта).
-    3) Фильтрация по простым правилам (пока заглушка, пропускаем всё).
-    4) Сохранение прошедших в tokens.
-    5) Очистка старых записей из raw_tokens.
-    """
 
+async def collect_and_filter() -> Dict[str, Any]:
+    """
+    1) Сбор сырых токенов с CoinGecko.
+    2) Классификация: мем / серьёзные / мусор.
+    3) В БД сохраняем сырые + только серьёзные.
+    4) Возвращаем краткую статистику.
+    """
     engine = get_engine()
 
-    # -------- Параметры из переменных окружения --------
-    max_raw = int(os.getenv("MAX_RAW", "5000"))
+    max_raw = int(os.getenv("MAX_RAW", "1000"))
     analysis_mode = os.getenv("ANALYSIS_MODE", "previous_day").lower()
     raw_retention_hours = int(os.getenv("RAW_RETENTION_HOURS", "24"))
 
     if analysis_mode != "previous_day":
         analysis_mode = "previous_day"
 
-    # Текущее время в UTC
     now_utc = datetime.now(timezone.utc)
 
-    # Окно «вчера» в UTC (для отчёта; CoinGecko по дате мы не режем)
     start_utc = (now_utc - timedelta(days=1)).replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
+        hour=0, minute=0, second=0, microsecond=0
     )
     end_utc = start_utc + timedelta(days=1)
 
-    # -------- Шаг 1. Сбор сырых монет с CoinGecko --------
-    cg_api_key = os.getenv("COINGECO_API_KEY", "")
-
+    cg_api_key = os.getenv("COINGECKO_API_KEY", "")
     coins: List[Dict[str, Any]] = await fetch_latest_coins(cg_api_key, max_raw)
 
-    # -------- Шаг 2. Запись сырых токенов в raw_tokens --------
-    # Ожидаем таблицу raw_tokens:
-    # id (serial), source (text), symbol (text), address (text),
-    # created_at (timestamptz), raw_json (jsonb)
+    # ---- классификация ----
+    memecoins: List[Dict[str, Any]] = []
+    serious_tokens_list: List[Dict[str, Any]] = []
+    trash_tokens: List[Dict[str, Any]] = []
 
+    for tk in coins:
+        cls = classify_token(tk)
+
+        if cls in ("serious", "serious_memecoin"):
+            serious_tokens_list.append(tk)
+
+        if "memecoin" in cls:
+            memecoins.append(tk)
+
+        if "trash" in cls:
+            trash_tokens.append(tk)
+
+    passed_tokens = serious_tokens_list
+
+    # ---- запись в БД ----
     with engine.begin() as conn:
+        # сырые
         for tk in coins:
             conn.execute(
                 text(
@@ -194,38 +201,11 @@ async def collect_and_filter():
                     "symbol": tk.get("symbol") or "",
                     "address": tk.get("id") or "",
                     "created_at": now_utc,
-                    # ВАЖНО: dict -> JSON-строка, чтобы psycopg2 смог это вставить
-                    "raw_json": json.dumps(tk, ensure_ascii=False),
+                    "raw_json": json.dumps(tk),
                 },
             )
 
-        # -------- Шаг 3. Фильтрация --------
-    memecoins: List[Dict[str, Any]] = []
-    serious_tokens: List[Dict[str, Any]] = []
-    trash_tokens: List[Dict[str, Any]] = []
-
-    for tk in coins:
-        cls = classify_token(tk)
-
-        if cls in ("serious", "serious_memecoin"):
-            serious_tokens.append(tk)
-
-        if "memecoin" in cls:
-            memecoins.append(tk)
-
-        if "trash" in cls:
-            trash_tokens.append(tk)
-
-    # В БД и в результат пайплайна пойдут только серьёзные проекты
-    passed_tokens = serious_tokens
-
-
-    # -------- Шаг 4. Сохранение прошедших в tokens --------
-    # Ожидаем таблицу tokens:
-    # symbol (text), address (text PRIMARY KEY), source (text),
-    # listed_at (timestamptz), raw_json (jsonb)
-
-    with engine.begin() as conn:
+        # только серьёзные проекты
         for tk in passed_tokens:
             conn.execute(
                 text(
@@ -240,23 +220,21 @@ async def collect_and_filter():
                     "address": tk.get("id") or "",
                     "source": "coingecko",
                     "listed_at": now_utc,
-                    # снова dict -> JSON-строка
-                    "raw_json": json.dumps(tk, ensure_ascii=False),
+                    "raw_json": json.dumps(tk),
                 },
             )
 
-        # -------- Шаг 5. Очистка старых сырых --------
         cutoff = now_utc - timedelta(hours=raw_retention_hours)
         conn.execute(
             text("DELETE FROM raw_tokens WHERE created_at < :cutoff"),
             {"cutoff": cutoff},
         )
 
-       return {
+    return {
         "collected": len(coins),
         "passed": len(passed_tokens),
         "memecoins": len(memecoins),
-        "serious": len(serious_tokens),
+        "serious": len(serious_tokens_list),
         "trash": len(trash_tokens),
         "analysis_mode": analysis_mode,
         "window_start_utc": start_utc.isoformat(),
@@ -264,7 +242,42 @@ async def collect_and_filter():
     }
 
 
-
-async def run_once():
+async def run_once() -> Dict[str, Any]:
     """Обёртка для единичного запуска пайплайна (используется в main.py)."""
     return await collect_and_filter()
+
+
+# -------------------- TELEGRAM (нужен для main.py) -------------------- #
+
+
+async def send_telegram(message: str) -> None:
+    """
+    Простая отправка текста в Telegram.
+    Используется /telegram_test и в будущем для ежедневного отчёта.
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("[Telegram] TOKEN or CHAT_ID not set, skip sending")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                print(
+                    "[Telegram] send failed:",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+    except Exception as e:
+        print(f"[Telegram] exception on send: {e}")
