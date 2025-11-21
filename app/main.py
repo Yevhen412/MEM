@@ -11,9 +11,8 @@ app = FastAPI()
 
 @app.get("/telegram_test")
 async def telegram_test():
-    # разовый тест отправки сообщения в Telegram
-    await send_telegram("Тестовое сообщение из Railway 🚀")
-    return {"status": "sent"}
+    result = await send_telegram("Тестовое сообщение из Railway 🚀")
+    return result
 
 
 @app.get("/health")
@@ -33,6 +32,4 @@ async def run_daily():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     import uvicorn
-
-    # запуск локально
     uvicorn.run("app.main:app", host="0.0.0.0", port=port)
