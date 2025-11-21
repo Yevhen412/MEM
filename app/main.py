@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from .pipeline import run_once
+from .notifier import send_telegram, format_telegram_message
 
 app = FastAPI()
 
@@ -18,7 +19,26 @@ async def health():
 async def run_daily():
     try:
         result = await run_once()
+
+        # формируем текст и отправляем в Telegram
+        message = format_telegram_message(result)
+        await send_telegram(message)
+
+        # а в ответ API по-прежнему отдаём "сырой" JSON
         return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/telegram_test")
+async def telegram_test():
+    """
+    Простой тест: отправить статическое сообщение.
+    Удобно, чтобы проверять токен/чат без запуска пайплайна.
+    """
+    try:
+        await send_telegram("Тестовое сообщение из Railway 🚀")
+        return {"status": "sent"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
