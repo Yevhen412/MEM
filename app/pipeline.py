@@ -248,17 +248,25 @@ async def run_once() -> Dict[str, Any]:
 
 # -------------------- TELEGRAM (нужен для main.py) -------------------- #
 
-async def send_telegram(message: str) -> None:
+# -------------------- TELEGRAM (нужен для main.py) -------------------- #
+
+async def send_telegram(message: str) -> dict:
     """
-    Простая отправка текста в Telegram.
-    Используется /telegram_test и в будущем для ежедневного отчёта.
+    Отправка текста в Telegram.
+    ВОЗВРАЩАЕТ подробный результат, чтобы можно было дебажить.
     """
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print("[Telegram] TOKEN or CHAT_ID not set, skip sending")
-        return
+        info = {
+            "ok": False,
+            "reason": "TOKEN_OR_CHAT_ID_MISSING",
+            "token_present": bool(token),
+            "chat_id_present": bool(chat_id),
+        }
+        print("[Telegram] env missing:", info)
+        return info
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
@@ -271,11 +279,22 @@ async def send_telegram(message: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                print(
-                    "[Telegram] send failed:",
-                    resp.status_code,
-                    resp.text[:200],
-                )
+
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text}
+
+        result = {
+            "ok": body.get("ok", resp.status_code == 200),
+            "status_code": resp.status_code,
+            "body": body,
+        }
+
+        print("[Telegram] response:", result)
+        return result
+
     except Exception as e:
-        print(f"[Telegram] exception on send: {e}")
+        err = {"ok": False, "error": str(e)}
+        print("[Telegram] exception:", err)
+        return err
