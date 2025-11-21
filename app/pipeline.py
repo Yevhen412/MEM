@@ -96,7 +96,7 @@ async def fetch_latest_coins(cg_api_key: str | None, max_raw: int) -> List[Dict[
                 "per_page": per_page,
                 "page": page,
                 "sparkline": "false",
-            }
+            """
 
             try:
                 resp = await client.get(
@@ -145,7 +145,7 @@ async def collect_and_filter() -> Dict[str, Any]:
     1) Сбор сырых токенов с CoinGecko.
     2) Классификация: мем / серьёзные / мусор.
     3) В БД сохраняем сырые + только серьёзные.
-    4) Возвращаем краткую статистику.
+    4) Возвращаем краткую статистику + список серьёзных для Telegram.
     """
     engine = get_engine()
 
@@ -230,12 +230,34 @@ async def collect_and_filter() -> Dict[str, Any]:
             {"cutoff": cutoff},
         )
 
+    # -------- формируем список для Telegram -------- #
+
+    serious_tokens_for_tg: List[Dict[str, Any]] = []
+    for tk in passed_tokens:
+        name = tk.get("name") or tk.get("symbol") or ""
+        symbol = tk.get("symbol") or ""
+        coin_id = tk.get("id") or ""
+
+        link = ""
+        if coin_id:
+            # простая ссылка на страницу монеты на CoinGecko
+            link = f"https://www.coingecko.com/en/coins/{coin_id}"
+
+        serious_tokens_for_tg.append(
+            {
+                "name": name,
+                "symbol": symbol,
+                "link": link,
+            }
+        )
+
     return {
         "collected": len(coins),
         "passed": len(passed_tokens),
         "memecoins": len(memecoins),
         "serious": len(serious_tokens_list),
         "trash": len(trash_tokens),
+        "serious_tokens": serious_tokens_for_tg,  # сюда смотрим из Telegram
         "analysis_mode": analysis_mode,
         "window_start_utc": start_utc.isoformat(),
         "window_end_utc": end_utc.isoformat(),
